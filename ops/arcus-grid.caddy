@@ -1,0 +1,9 @@
+trade.example.com {
+    encode zstd gzip
+    header Strict-Transport-Security "max-age=31536000"
+    header X-Robots-Tag "noindex, nofollow"
+    request_body {
+        max_size 16KB
+    }
+    reverse_proxy 127.0.0.1:8787
+}

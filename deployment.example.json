@@ -1,0 +1,7 @@
+{
+  "publicUrl": "https://trade.example.com",
+  "sshCredentialsFile": "~/private/server-ssh.txt",
+  "apiCredentialsFile": "~/private/arcus-api.txt",
+  "walletAddress": "YOUR_ETHEREUM_WALLET_ADDRESS",
+  "quantSourceDir": "../quant/src/nakedquant"
+}
