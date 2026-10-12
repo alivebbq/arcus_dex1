@@ -111,6 +111,23 @@ returns PENDING; an uncertain write raises an uncertainty-marked error. The
 caller must persist intent before the write and only poll GET after an
 uncertain outcome. No live grid order may be sent before exact verification.
 
+## Account-wide fill statistics
+
+The dashboard reads all markets through the subaccount-scoped `/v1/fills`
+ledger. It does not use a wallet-wide rollup as a subaccount total. Pages use
+inclusive Unix-microsecond `from`/`to` bounds and deduplicate the composite
+trade/order identity. Unresolvable timestamp saturation is reported as partial;
+unread pages are never represented as complete cumulative statistics.
+
+Turnover sums `abs(size * price)` for opening and closing fills. Ordinary
+`closedPnl` already includes the fill's trading fee, so realized trading PnL
+is summed without subtracting the fee a second time. Fees are summed separately,
+with negative rebates preserved. Funding payments are excluded from this figure.
+Missing PnL fields or liquidation records with incomplete documented accounting
+leave PnL unknown while independently verified volume and fees remain available.
+The authoritative field definitions are in the official
+[fills reference](https://docs.arcus.xyz/api-reference/public/get-fills).
+
 ## Validation performed
 
 `python -m unittest backend.test_arcus -v`: 18 deterministic tests cover the

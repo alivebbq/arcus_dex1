@@ -19,10 +19,13 @@ from .grid import GridEngine
 from .trend import TrendEngine
 from .security import authenticated, check_password, create_session, revoke_session
 from .store import Store
+from .account_statistics import AccountStatisticsService
+from .strategy_management import delete_strategy as remove_strategy, StrategyDeletionBlocked
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = '1.2.0'
-store = Store(os.environ.get('DATA_DIR', str(ROOT / 'data')), os.environ['VAULT_KEY'])
+VERSION = '1.3.0'
+DATA_DIR = Path(os.environ.get('DATA_DIR', str(ROOT / 'data')))
+store = Store(DATA_DIR, os.environ['VAULT_KEY'])
 control_lock = threading.RLock()
 public_client = ArcusClient()
 markets_cache = []
@@ -35,13 +38,15 @@ clients = {}
 
 
 def client_factory(account):
-    if account['id'] not in clients:
-        clients[account['id']] = ArcusClient(store.credentials(account))
-    return clients[account['id']]
+    with control_lock:
+        if account['id'] not in clients:
+            clients[account['id']] = ArcusClient(store.credentials(account))
+        return clients[account['id']]
 
 
 engine = GridEngine(store, client_factory)
 trend_engine = TrendEngine(store, client_factory)
+account_statistics = AccountStatisticsService(DATA_DIR / 'account-statistics', client_factory)
 trend_candle_cache = {}
 
 
@@ -74,7 +79,9 @@ def safe_error(error):
 
 
 def account_view(account):
-    return {'id': account['id'], 'name': account['name'], 'address': account['address'], **account['snapshot']}
+    return {**account['snapshot'], 'id': account['id'], 'name': account['name'], 'address': account['address'],
+            'accountIndex': int(store.credentials(account).get('accountIndex', 0)),
+            'statistics': account_statistics.snapshot(account['id'])}
 
 
 def refresh_account(account):
@@ -128,7 +135,12 @@ def one_cycle():
             continue
         with control_lock:
             strategy = store.get_strategy(strategy['id'])
+            if not strategy:
+                # A user may delete a safe record after this cycle took its list.
+                continue
             account = store.get_account(strategy['accountId'])
+            if not account:
+                continue
             market = None
             try:
                 market = strategy_market(strategy)
@@ -183,16 +195,25 @@ async def worker():
         await asyncio.sleep(5)
 
 
+async def statistics_worker():
+    # Historical pagination never holds up the trading/reconciliation worker.
+    while True:
+        for account in store.accounts():
+            try:
+                await asyncio.to_thread(account_statistics.sync_step, account, max_pages=1)
+            except Exception as exc:
+                store.event('warning', '账户成交统计同步异常：' + safe_error(exc), accountId=account['id'])
+        await asyncio.sleep(1)
+
+
 @asynccontextmanager
 async def lifespan(app):
     # Durable states survive restart; worker reconciles every persisted client id.
-    task = asyncio.create_task(worker())
+    tasks = [asyncio.create_task(worker()), asyncio.create_task(statistics_worker())]
     yield
-    task.cancel()
-    try:
-        await task
-    except asyncio.CancelledError:
-        pass
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
 
 
 app = FastAPI(title='Arcus Grid', docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
@@ -343,7 +364,8 @@ def add_account(body: AccountInput):
         snap.update(connected=True, error=None, updatedAt=int(time.time() * 1000))
         account = store.add_account(body.name.strip(), credentials, snap)
         clients[account['id']] = client
-        store.event('info', f'已添加账户：{body.name.strip()}')
+        account_statistics.request_sync(account['id'])
+        store.event('info', f'已添加账户：{body.name.strip()}', accountId=account['id'])
         return account_view(account)
 
 
@@ -353,19 +375,36 @@ def account_refresh(account_id: str):
         account = store.get_account(account_id)
         if not account:
             raise HTTPException(404, '账户不存在')
+        account_statistics.request_sync(account_id)
         return account_view(refresh_account(account))
 
 
 @app.delete('/api/accounts/{account_id}')
 def delete_account(account_id: str):
     with control_lock:
+        if not store.get_account(account_id):
+            raise HTTPException(404, '账户不存在')
         strategies = [s for s in store.strategies() if s['accountId'] == account_id]
         if any(s['status'] != 'stopped' or Decimal(s.get('residualQuantity', '0')) != 0 or bool(s.get('orders'))
                or bool(s.get('protection')) for s in strategies):
             raise HTTPException(409, '请先停止该账户的所有策略；有待处理挂单或持仓时不能删除账户')
         store.delete_account(account_id)
+        account_statistics.forget(account_id)
         clients.pop(account_id, None)
         return {'deleted': True}
+
+
+@app.delete('/api/strategies/{strategy_id}')
+def delete_strategy(strategy_id: str):
+    with control_lock:
+        strategy = store.get_strategy(strategy_id)
+        if not strategy:
+            raise HTTPException(404, '策略不存在')
+        account = store.get_account(strategy['accountId'])
+        try:
+            return remove_strategy(store, strategy, account, client_factory)
+        except StrategyDeletionBlocked as exc:
+            raise HTTPException(409, safe_error(exc)) from exc
 
 
 @app.get('/api/markets/{symbol}/candles')

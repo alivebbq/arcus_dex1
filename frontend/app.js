@@ -19,6 +19,8 @@
   const getMarket = () => state.data.markets.find((market) => market.symbol === state.market);
   const selectedStrategies = () => state.data.strategies.filter((strategy) => strategy.accountId === state.accountId);
   const isTrendStrategy = (strategy) => strategy.type === 'trend';
+  const maskedAddress = (address) => /^0x[0-9a-fA-F]{40}$/.test(String(address || '')) ? `${address.slice(0, 6)}…${address.slice(-4)}` : '地址待同步';
+  const accountIdentity = (account) => account ? `${account.name || '未命名账户'} · ${number(account.accountIndex) === null ? '索引待同步' : `子账户 ${compact(account.accountIndex, 0)}`} · ${maskedAddress(account.address)}` : '账户待同步';
   const saveSelection = () => { try { localStorage.setItem(storageKey, JSON.stringify({ accountId: state.accountId, market: state.market, view: state.view })); } catch { /* The dashboard works if storage is disabled. */ } };
 
   async function api(path, options = {}) {
@@ -98,8 +100,9 @@
   function renderAccounts() {
     const accounts = state.data.accounts;
     const account = getAccount();
-    setOptions($('account-select'), accounts.map((item) => ({ value: item.id, label: item.name })), state.accountId, '请先添加账户');
-    $('sidebar-accounts').innerHTML = accounts.length ? accounts.map((item) => `<button class="side-account ${item.id === state.accountId ? 'active' : ''} ${item.connected ? 'connected' : ''}" data-account-id="${escape(item.id)}" ${item.id === state.accountId ? 'aria-current="true"' : ''}><span class="account-dot"></span><span title="${escape(item.name)}">${escape(item.name)}</span></button>`).join('') : '<div class="sidebar-empty">尚未添加账户</div>';
+    setOptions($('account-select'), accounts.map((item) => ({ value: item.id, label: accountIdentity(item) })), state.accountId, '请先添加账户');
+    $('account-select').title = account ? accountIdentity(account) : '请先添加账户';
+    $('sidebar-accounts').innerHTML = accounts.length ? accounts.map((item) => `<button class="side-account ${item.id === state.accountId ? 'active' : ''} ${item.connected ? 'connected' : ''}" data-account-id="${escape(item.id)}" title="${escape(accountIdentity(item))}" aria-label="${escape(accountIdentity(item))}" ${item.id === state.accountId ? 'aria-current="true"' : ''}><span class="account-dot"></span><span class="side-account-copy"><span>${escape(item.name)}</span><small>${number(item.accountIndex) === null ? '索引待同步' : `子账户 ${compact(item.accountIndex, 0)}`} · ${escape(maskedAddress(item.address))}</small></span></button>`).join('') : '<div class="sidebar-empty">尚未添加账户</div>';
     $('account-equity').textContent = fmt(account?.equity);
     $('account-available').textContent = fmt(account?.availableBalance);
     $('account-pnl').textContent = signed(account?.unrealizedPnl);
@@ -109,6 +112,37 @@
     setError('account-error', account?.error ? `${account.name}：${account.error}${account.updatedAt ? `（最近成功同步 ${time(account.updatedAt)}）` : ''}` : account && !account.connected ? '账户尚未连接。同步成功后可查看余额与持仓。' : '');
     $('position-count').textContent = account?.positions?.length || 0;
     $('order-count').textContent = account?.orders?.length || 0;
+    renderAccountStatistics();
+  }
+
+  function statisticsDate(value) {
+    if (value === null || value === undefined || value === '') return '—';
+    const numeric = number(value);
+    const stamp = numeric === null ? value : numeric >= 100000000000000 ? numeric / 1000 : numeric < 100000000000 ? numeric * 1000 : numeric;
+    const date = new Date(stamp);
+    return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false });
+  }
+  function renderAccountStatistics() {
+    const account = getAccount(), statistics = account?.statistics;
+    const historyReady = Boolean(account && (statistics?.complete === true || statistics?.historyComplete === true) && statistics.stale !== true);
+    const turnoverReady = historyReady && statistics.turnoverKnown === true;
+    const feesReady = historyReady && statistics.feesKnown === true;
+    const pnlReady = historyReady && statistics.pnlKnown === true;
+    $('statistics-account').textContent = account ? accountIdentity(account) : '请选择交易账户';
+    $('statistics-turnover').textContent = turnoverReady ? fmt(statistics.turnover) : '—';
+    $('statistics-realized-pnl').textContent = pnlReady ? signed(statistics.realizedPnl) : '—';
+    $('statistics-realized-pnl').className = pnlReady ? signClass(statistics.realizedPnl) : '';
+    $('statistics-fees').textContent = feesReady ? fmt(statistics.fees) : '—';
+    const status = statistics?.stale === true && statistics.updatedAt !== null && statistics.updatedAt !== undefined ? 'stale' : statistics?.status || 'waiting';
+    $('statistics-status').textContent = !account ? '未选择账户' : ({ ready: historyReady ? '已同步' : '记录不完整', sync: '统计同步中', syncing: '统计同步中', partial: historyReady ? '部分指标待核验' : '记录不完整', error: '统计同步失败', stale: '统计已过期', waiting: '等待同步' })[status] || '等待同步';
+    $('statistics-status').className = `statistics-status ${status === 'ready' && historyReady ? 'ready' : status === 'error' || status === 'partial' || status === 'stale' ? 'warning' : ''}`;
+    const period = statistics?.toTime !== null && statistics?.toTime !== undefined ? statistics.fromTime !== null && statistics.fromTime !== undefined ? `${statisticsDate(statistics.fromTime)} – ${statisticsDate(statistics.toTime)}（上海时间）` : `交易所可读取的累计记录 · 截至 ${statisticsDate(statistics.toTime)}（上海时间）${historyReady && number(statistics.fillCount) === 0 ? '（暂无成交）' : ''}` : '统计区间待同步';
+    const count = historyReady && number(statistics.fillCount) !== null ? ` · ${compact(statistics.fillCount, 0)} 笔成交` : '';
+    const updated = statistics?.updatedAt ? ` · 更新 ${statisticsDate(statistics.updatedAt)}` : '';
+    $('statistics-period').textContent = `${period}${count}${updated}`;
+    const message = !account ? '选择账户后显示该子账户的真实成交统计。' : statistics?.error || (historyReady ? status === 'sync' || status === 'syncing' ? '正在同步；当前数值为上方截止时间前已核验的记录。' : pnlReady ? '' : number(statistics.liquidationFillCount) > 0 ? '部分清算成交缺少可核验的已实现盈亏，仅显示已确认的成交金额与手续费。' : '已实现盈亏记录未核验完整，仅显示已确认的成交金额与手续费。' : status === 'partial' ? '历史记录尚未完整核验，累计值暂不显示。' : status === 'stale' ? '统计已过期，等待重新同步后显示累计值。' : '成交记录正在同步，未知数值以 — 显示。');
+    $('statistics-message').textContent = message;
+    $('statistics-message').hidden = !message;
   }
 
   function renderMarket() {
@@ -164,7 +198,20 @@
     if (['draft', 'paused', 'stopped', 'error'].includes(strategy.status)) actions.push(`<button class="action-button" data-strategy-id="${id}" data-action="start">${strategy.status === 'paused' ? '恢复' : '启动'}</button>`);
     if (strategy.status === 'running') actions.push(`<button class="action-button" data-strategy-id="${id}" data-action="pause">暂停</button>`);
     if (!['draft', 'stopped'].includes(strategy.status)) actions.push(`<button class="action-button danger" data-strategy-id="${id}" data-action="stop">停止</button>`);
+    const blocked = strategyDeleteReason(strategy);
+    actions.push(`<button class="action-button danger" data-delete-strategy="${id}" ${blocked ? `disabled title="${escape(blocked)}" aria-label="删除策略：${escape(blocked)}"` : ''}>删除</button>${blocked ? `<span class="strategy-delete-hint">${escape(blocked)}</span>` : ''}`);
     return actions.length ? actions.join('') : '<span class="secondary-text">等待执行</span>';
+  }
+  function strategyDeleteReason(strategy) {
+    if (!['draft', 'paused', 'stopped'].includes(strategy.status)) return '先停止并处理持仓/订单';
+    if (strategy.mode === 'paper') return '';
+    if ([strategy.residualQuantity, strategy.inventory, strategy.position?.size].some((quantity) => number(quantity) !== null && Math.abs(Number(quantity)) > 0)) return '先停止并处理持仓/订单';
+    if (!Array.isArray(strategy.orders) || strategy.orders.length) return '先停止并处理持仓/订单';
+    if (number(strategy.residualQuantity ?? strategy.inventory) !== 0) return '持仓状态待核验';
+    const terminal = ['FILLED', 'CANCELED', 'CANCELLED', 'REJECTED', 'EXPIRED', 'TPSL_CANCELED'];
+    if ([strategy.protection, strategy.emergency].some((order) => order && !terminal.includes(String(order.status || '').toUpperCase()))) return '先停止并处理持仓/订单';
+    if (strategy.marginSetup?.state === 'pending') return '合约设置待确认';
+    return '';
   }
 
   function renderStrategies() {
@@ -193,12 +240,13 @@
     document.querySelectorAll('[data-tab]').forEach((tab) => { const active = tab.dataset.tab === state.tab; tab.classList.toggle('active', active); tab.setAttribute('aria-selected', String(active)); tab.tabIndex = active ? 0 : -1; });
     let html;
     if (state.tab === 'logs') {
-      const events = state.data.events;
+      const ownedIds = new Set(selectedStrategies().map((strategy) => strategy.id));
+      const events = state.data.events.filter((event) => event.accountId ? event.accountId === state.accountId : event.strategyId ? ownedIds.has(event.strategyId) : ['error', 'warning', 'warn'].includes(event.level));
       html = events.length ? `<div class="log-list">${events.slice(0, 100).map((event) => `<div class="log-row"><span class="log-time">${escape(time(event.time, true))}</span><span class="log-level ${escape(event.level)}">${escape(({ info: '信息', error: '错误', warning: '提醒', warn: '提醒', success: '成功' })[event.level] || event.level)}</span><span class="log-message">${escape(event.message)}</span></div>`).join('')}</div>` : '<div class="table-empty"><strong>暂无运行记录</strong>创建策略、启动与成交后，相关事件会显示在这里。</div>';
     } else if (!account) {
       html = '<div class="table-empty"><strong>尚未添加交易账户</strong><button type="button" data-open-account>添加交易账户</button>以读取真实余额、持仓和订单。</div>';
     } else if (state.tab === 'assets') {
-      html = `<div class="asset-grid"><div class="asset-item"><span>账户权益</span><div><strong>${fmt(account.equity)}</strong><small>USD</small></div></div><div class="asset-item"><span>可用余额</span><div><strong>${fmt(account.availableBalance)}</strong><small>USD</small></div></div><div class="asset-item"><span>未实现盈亏</span><div><strong class="${signClass(account.unrealizedPnl)}">${signed(account.unrealizedPnl)}</strong><small>USD</small></div></div></div><div class="account-detail-info"><span class="account-address">${escape(account.address || '未返回账户地址')} · ${account.connected ? '已连接' : '连接异常'}</span><button class="text-button danger" data-delete-account="${escape(account.id)}">移除账户</button></div>`;
+      html = `<div class="asset-grid"><div class="asset-item"><span>账户权益</span><div><strong>${fmt(account.equity)}</strong><small>USD</small></div></div><div class="asset-item"><span>可用余额</span><div><strong>${fmt(account.availableBalance)}</strong><small>USD</small></div></div><div class="asset-item"><span>未实现盈亏</span><div><strong class="${signClass(account.unrealizedPnl)}">${signed(account.unrealizedPnl)}</strong><small>USD</small></div></div></div><div class="account-detail-info"><span class="account-address">${escape(accountIdentity(account))} · ${account.connected ? '已连接' : '连接异常'}</span><button class="text-button danger" data-delete-account="${escape(account.id)}">移除账户</button></div>`;
     } else if (state.tab === 'positions') {
       const positions = account.positions || [];
       html = `<div class="table-wrap"><table class="data-table"><thead><tr><th>市场</th><th>方向</th><th>持仓数量</th><th>开仓均价</th><th>标记价格</th><th class="align-right">未实现盈亏</th></tr></thead><tbody>${positions.length ? positions.map((position) => `<tr><td class="primary-text">${escape(position.market || position.symbol)}</td><td class="${['long', 'buy'].includes(String(position.side).toLowerCase()) ? 'positive' : 'negative'}">${escape(sideLabel(position.side))}</td><td>${compact(position.size)}</td><td>${compact(position.entryPrice, 5)}</td><td>${compact(position.markPrice, 5)}</td><td class="align-right ${signClass(position.unrealizedPnl)}">${signed(position.unrealizedPnl)} <span class="secondary-text">USD</span></td></tr>`).join('') : `<tr><td colspan="6" class="table-empty"><strong>${account.connected ? '当前账户暂无持仓' : '持仓数据待同步'}</strong>${account.connected ? '策略成交后，可在这里查看交易所返回的持仓。' : '请同步账户，连接成功后读取交易所持仓。'}</td></tr>`}</tbody></table></div>`;
@@ -443,7 +491,13 @@
   function orderStatus(value) { return ({ OPEN: '挂单中', NEW: '新委托', PARTIALLY_FILLED: '部分成交', PARTIAL: '部分成交', FILLED: '已成交', CANCELED: '已撤单', CANCELLED: '已撤单', REJECTED: '被拒绝', EXPIRED: '已过期', SUBMITTING: '提交中', UNKNOWN: '待核对' })[String(value || '').toUpperCase()] || value || '—'; }
   function renderStrategyDetail() {
     const strategy = state.data.strategies.find((item) => item.id === state.selectedStrategyId);
-    if (!strategy) return;
+    if (!strategy || strategy.accountId !== state.accountId) { state.selectedStrategyId = null; if ($('strategy-dialog').open) closeDialog('strategy-dialog'); return; }
+    const blocked = strategyDeleteReason(strategy);
+    $('delete-inspected-strategy').disabled = Boolean(blocked);
+    $('delete-inspected-strategy').dataset.deleteStrategy = strategy.id;
+    $('delete-inspected-strategy').title = blocked || '删除这条策略记录';
+    $('strategy-delete-reason').textContent = blocked;
+    $('strategy-delete-reason').hidden = !blocked;
     if (isTrendStrategy(strategy)) { renderTrendStrategyDetail(strategy); return; }
     const stats = strategy.stats || {};
     const orders = strategy.orders || [];
@@ -462,7 +516,7 @@
     $('strategy-detail-body').innerHTML = `<div class="strategy-metrics"><div><span>已实现毛收益 / USD</span><strong class="${signClass(strategy.stats?.realizedPnl)}">${signed(strategy.stats?.realizedPnl)}</strong></div><div><span>${simulated ? '模拟' : '策略'}持仓数量</span><strong>${compact(residual)}</strong></div><div><span>投入保证金 / USD</span><strong>${fmt(strategy.budget)}</strong></div><div><span>当前策略订单</span><strong>${orders.length}</strong></div></div>${residual > 0 && ['paused', 'stopped', 'error'].includes(strategy.status) ? '<div class="strategy-detail-alert">新开仓已停止。已有持仓继续受初始止损、保本和超时兜底管理；不会立即市价平仓。</div>' : ''}<p class="strategy-detail-note">参考 quant 当前 ETH 1 小时 SuperTrend 规则，使用 Arcus 自身行情。合格反转信号先退出反向持仓，不立即反手；启动时不追入历史信号。</p><p class="strategy-detail-note">优先挂单开仓与平仓，限价保护止损可能按 Taker 成交。初始止损由交易所托管；2R 保本与触发后 10 秒的市价兜底需服务器在线。毛收益未扣除手续费与资金费。</p><h3 class="strategy-order-heading">${simulated ? '模拟策略订单' : '策略订单'}</h3><div class="table-wrap"><table class="data-table"><thead><tr><th>用途</th><th>方向</th><th>价格</th><th>数量 / 已成交</th><th>订单状态</th><th>执行方式</th></tr></thead><tbody>${orders.length ? orders.map((order) => `<tr><td>${escape(({ entry: '开仓', exit: '退出', stop: '保护止损', protection: '保护止损', emergency: '市价兜底' })[order.leg] || order.leg || '策略委托')}</td><td>${escape(sideLabel(order.side))}</td><td>${compact(order.price, 6)}</td><td>${order.positionTpsl && number(order.size) === 0 ? '全部策略持仓' : compact(order.size)}<div class="secondary-text">已成交 ${compact(order.filledSize)}</div></td><td>${escape(orderStatus(order.status || order.state))}</td><td>${simulated ? '模拟' : escape(order.timeInForce || order.orderType || '—')}${!simulated && order.positionTpsl ? '<div class="secondary-text">可能按 Taker 成交</div>' : ''}</td></tr>`).join('') : '<tr><td colspan="6" class="table-empty"><strong>当前没有策略订单</strong>信号满足开仓条件时，策略按规则执行。</td></tr>'}</tbody></table></div>${strategy.error ? `<p class="form-error">${escape(strategy.error)}</p>` : ''}`;
   }
   function inspectStrategy(id) {
-    const strategy = state.data.strategies.find((item) => item.id === id);
+    const strategy = state.data.strategies.find((item) => item.id === id && item.accountId === state.accountId);
     if (!strategy) return;
     if (strategy.market !== state.market) changeMarket(strategy.market);
     clearTimeout(previewTimer); state.previewRequest++; state.preview = null; state.selectedStrategyId = id;
@@ -486,13 +540,14 @@
     finally { busy(button, false); }
   }
   function handleStrategyAction(strategy, action, button) {
+    if (strategy.accountId !== state.accountId) return;
     if (isTrendStrategy(strategy)) { handleTrendStrategyAction(strategy, action, button); return; }
     if (action === 'start' && strategy.mode === 'live') {
       const account = state.data.accounts.find((item) => item.id === strategy.accountId);
       const fundingDetails = isMarginBudget(strategy) ? [['投入保证金', `${fmt(strategy.budget)} USD（含缓冲预留）`], ['名义额度上限', `${fmt(strategyNotionalBudget(strategy))} USD`]] : [['名义额度（旧配置）', `${fmt(strategy.budget)} USD`]];
       const contractDetails = isMarginBudget(strategy) ? ['杠杆与保证金模式', `${compact(strategyLeverage(strategy), 0)} 倍 · ${marginModeLabel(strategy.marginMode)}`] : ['合约设置', '沿用交易所现有设置，旧配置未指定'];
       const message = isMarginBudget(strategy) ? '确认后先同步该账户的合约杠杆与保证金模式，再向 Arcus 提交真实挂单。全仓共用账户保证金，价格超出区间时也需关注持仓。' : '旧配置按名义金额全额预留资金，沿用交易所已有杠杆与保证金模式，不放大订单。确认后向 Arcus 提交真实挂单。';
-      openConfirm({ title: '启动实盘合约网格', message, live: true, button: '确认并启动实盘', details: [['策略', strategy.name], ['交易账户', account?.name || '—'], ['永续合约与方向', `${strategy.market} · ${strategy.direction === 'short' ? '做空' : '做多'}`], contractDetails, ['价格区间', `${compact(strategy.lower)} – ${compact(strategy.upper)}`], ...fundingDetails], action: async () => { await api(`/api/strategies/${encodeURIComponent(strategy.id)}/start`, { method: 'POST' }); toast('已请求启动实盘合约网格'); await pollState(); } });
+      openConfirm({ title: '启动实盘合约网格', message, live: true, button: '确认并启动实盘', details: [['策略', strategy.name], ['交易账户', accountIdentity(account)], ['永续合约与方向', `${strategy.market} · ${strategy.direction === 'short' ? '做空' : '做多'}`], contractDetails, ['价格区间', `${compact(strategy.lower)} – ${compact(strategy.upper)}`], ...fundingDetails], action: async () => { await api(`/api/strategies/${encodeURIComponent(strategy.id)}/start`, { method: 'POST' }); toast('已请求启动实盘合约网格'); await pollState(); } });
     } else if (action === 'stop') {
       openConfirm({ title: '停止网格策略', message: '策略将停止新开仓并撤销面板挂单。已有持仓不会市价平仓，请在账户持仓中确认并自行处理。', button: '停止策略', danger: true, details: [['策略', strategy.name], ['执行模式', strategy.mode === 'live' ? '实盘' : '模拟']], action: async () => { await api(`/api/strategies/${encodeURIComponent(strategy.id)}/stop`, { method: 'POST' }); toast('已请求停止策略'); await pollState(); } });
     } else performStrategyAction(strategy, action, button);
@@ -500,13 +555,30 @@
   function handleTrendStrategyAction(strategy, action, button) {
     if (action === 'start' && strategy.mode === 'live') {
       const account = state.data.accounts.find((item) => item.id === strategy.accountId);
-      openConfirm({ title: '启动实盘合约趋势', message: '启动后同步合约设置，按新的已收盘信号自动交易。开仓与普通平仓优先挂单；限价保护止损可能吃单，触发后 10 秒仍有余量时可市价退出。初始止损由交易所托管，2R 保本与超时兜底需服务器在线。同一账户的 ETH-USD 持仓不可与手工交易或其他策略混用。其他市场可继续交易，共享可用保证金。', live: true, button: '确认并启动实盘', details: [['策略', strategy.name], ['交易账户', account?.name || '—'], ['永续合约', strategy.market], ['趋势规则', '1h SuperTrend · ATR14 × 4 · ADX14 > 20'], ['杠杆与保证金模式', `${compact(strategyLeverage(strategy), 0)} 倍 · ${marginModeLabel(strategy.marginMode)}`], ['投入保证金', `${fmt(strategy.budget)} USD`], ['名义额度上限', `${fmt(strategyNotionalBudget(strategy))} USD`], ['计划风险', '可用资金的 3%，受策略投入上限约束']], action: async () => { await api(`/api/strategies/${encodeURIComponent(strategy.id)}/start`, { method: 'POST' }); toast('已请求启动实盘合约趋势'); await pollState(); } });
+      openConfirm({ title: '启动实盘合约趋势', message: '启动后同步合约设置，按新的已收盘信号自动交易。开仓与普通平仓优先挂单；限价保护止损可能吃单，触发后 10 秒仍有余量时可市价退出。初始止损由交易所托管，2R 保本与超时兜底需服务器在线。同一账户的 ETH-USD 持仓不可与手工交易或其他策略混用。其他市场可继续交易，共享可用保证金。', live: true, button: '确认并启动实盘', details: [['策略', strategy.name], ['交易账户', accountIdentity(account)], ['永续合约', strategy.market], ['趋势规则', '1h SuperTrend · ATR14 × 4 · ADX14 > 20'], ['杠杆与保证金模式', `${compact(strategyLeverage(strategy), 0)} 倍 · ${marginModeLabel(strategy.marginMode)}`], ['投入保证金', `${fmt(strategy.budget)} USD`], ['名义额度上限', `${fmt(strategyNotionalBudget(strategy))} USD`], ['计划风险', '可用资金的 3%，受策略投入上限约束']], action: async () => { await api(`/api/strategies/${encodeURIComponent(strategy.id)}/start`, { method: 'POST' }); toast('已请求启动实盘合约趋势'); await pollState(); } });
     } else if (action === 'stop') {
       openConfirm({ title: '停止趋势新开仓', message: '停止新开仓并撤销未成交开仓单；已有持仓继续受初始止损、保本和超时兜底管理。不会立即市价平仓，请在账户与策略详情中持续查看持仓。', button: '停止新开仓', danger: true, details: [['策略', strategy.name], ['执行模式', strategy.mode === 'live' ? '实盘' : '模拟']], action: async () => { await api(`/api/strategies/${encodeURIComponent(strategy.id)}/stop`, { method: 'POST' }); toast('趋势新开仓已请求停止，已有持仓继续受策略保护'); await pollState(); } });
     } else performStrategyAction(strategy, action, button);
   }
 
-  function changeAccount(id) { state.accountId = id; saveSelection(); renderAccounts(); renderStrategies(); renderTrendStrategies(); renderDetails(); queuePreview(); if (state.view === 'trend') queueTrendPreview(); else { state.trendPreview = null; state.trendPreviewRequest++; renderTrendPreview(); } }
+  function handleDeleteStrategy(strategy) {
+    if (strategy.accountId !== state.accountId) return;
+    const blocked = strategyDeleteReason(strategy);
+    if (blocked) { toast(blocked, true); return; }
+    const account = state.data.accounts.find((item) => item.id === strategy.accountId);
+    const message = strategy.mode === 'paper' ? '清除这条模拟策略及其模拟持仓和模拟订单，账户真实成交统计保留。此操作不改变交易所的真实持仓或订单。' : '删除该账户的这条面板策略记录。此操作不发送交易所撤单或平仓请求，已发生的真实成交仍计入账户统计。后台会再次核验策略状态、持仓和待处理订单。';
+    openConfirm({ title: '删除策略记录', message, button: '删除策略', danger: true, details: [['交易账户', accountIdentity(account)], ['策略', strategy.name], ['模块与市场', `${isTrendStrategy(strategy) ? '合约趋势' : '合约网格'} · ${strategy.market}`], ['执行模式', strategy.mode === 'live' ? '实盘' : '模拟']], action: async () => {
+      const result = await api(`/api/strategies/${encodeURIComponent(strategy.id)}`, { method: 'DELETE' });
+      if (result.deleted !== true || result.id !== strategy.id) throw new Error('删除结果尚未确认，请刷新策略列表。');
+      state.data.strategies = state.data.strategies.filter((item) => item.id !== strategy.id);
+      if (state.selectedStrategyId === strategy.id) { state.selectedStrategyId = null; if ($('strategy-dialog').open) closeDialog('strategy-dialog'); }
+      renderStrategies(); renderTrendStrategies(); renderChart(); renderDetails();
+      toast(`已删除策略：${strategy.name}`);
+      await pollState();
+    } });
+  }
+
+  function changeAccount(id) { if (id !== state.accountId) { state.selectedStrategyId = null; if ($('strategy-dialog').open) closeDialog('strategy-dialog'); if ($('confirm-dialog').open) closeDialog('confirm-dialog'); } state.accountId = id; saveSelection(); renderAccounts(); renderStrategies(); renderTrendStrategies(); renderDetails(); queuePreview(); if (state.view === 'trend') queueTrendPreview(); else { state.trendPreview = null; state.trendPreviewRequest++; renderTrendPreview(); } }
   function changeMarket(symbol) { if (symbol === state.market) return; state.market = symbol; state.candles = []; state.candleError = ''; state.preview = null; state.previewRequest++; state.trendPreview = null; state.trendPreviewRequest++; $('grid-lower').value = ''; $('grid-upper').value = ''; saveSelection(); renderMarket(); renderChart(); renderTrendSignal(); renderTrendChart(); queuePreview(); if (state.view === 'trend') { queueTrendPreview(); loadTrendSignal(); } loadCandles(); }
 
   $('login-form').addEventListener('submit', async (event) => { event.preventDefault(); const button = event.submitter; busy(button, true, '正在登录…'); setError('login-error', ''); try { await api('/api/login', { method: 'POST', body: { password: $('login-password').value } }); $('login-password').value = ''; await showApp(); } catch (error) { setError('login-error', error.message); } finally { busy(button, false); } });
@@ -565,8 +637,9 @@
     const close = event.target.closest('[data-close]'); if (close) closeDialog(close.dataset.close);
     if (event.target.closest('[data-open-account]')) openAccount();
     const inspect = event.target.closest('[data-inspect-strategy]'); if (inspect) inspectStrategy(inspect.dataset.inspectStrategy);
+    const deletion = event.target.closest('[data-delete-strategy]'); if (deletion && !deletion.disabled) { const strategy = state.data.strategies.find((item) => item.id === deletion.dataset.deleteStrategy); if (strategy) handleDeleteStrategy(strategy); }
     const action = event.target.closest('[data-strategy-id]'); if (action) { const strategy = state.data.strategies.find((item) => item.id === action.dataset.strategyId); if (strategy) handleStrategyAction(strategy, action.dataset.action, action); }
-    const remove = event.target.closest('[data-delete-account]'); if (remove) { const account = getAccount(); openConfirm({ title: '移除交易账户', message: '移除后将删除本面板保存的账户凭证。请先停止该账户的所有策略，并确认挂单与持仓已经处理。', details: [['账户', account?.name || '—']], button: '移除账户', danger: true, action: async () => { await api(`/api/accounts/${encodeURIComponent(remove.dataset.deleteAccount)}`, { method: 'DELETE' }); toast('账户已移除'); await pollState(); } }); }
+    const remove = event.target.closest('[data-delete-account]'); if (remove) { const account = getAccount(); openConfirm({ title: '移除交易账户', message: '移除后将删除本面板保存的账户凭证。请先停止该账户的所有策略，并确认挂单与持仓已经处理。', details: [['账户', accountIdentity(account)]], button: '移除账户', danger: true, action: async () => { await api(`/api/accounts/${encodeURIComponent(remove.dataset.deleteAccount)}`, { method: 'DELETE' }); toast('账户已移除'); await pollState(); } }); }
   });
   document.querySelector('.detail-tabs').addEventListener('keydown', (event) => { if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return; event.preventDefault(); const tabs = [...document.querySelectorAll('[data-tab]')]; const current = tabs.findIndex((tab) => tab.dataset.tab === state.tab); const index = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 : (current + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length; state.tab = tabs[index].dataset.tab; renderDetails(); tabs[index].focus(); });
   window.addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = window.setTimeout(() => { renderChart(); renderTrendChart(); }, 100); });

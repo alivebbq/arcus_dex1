@@ -27,6 +27,20 @@ class Store:
                 level TEXT NOT NULL, message TEXT NOT NULL, strategy_id TEXT);
             CREATE TABLE IF NOT EXISTS sessions(token_hash TEXT PRIMARY KEY, expires REAL NOT NULL);
         ''')
+        columns = {row['name'] for row in self.db.execute('PRAGMA table_info(events)')}
+        if 'account_id' not in columns:
+            self.db.execute('ALTER TABLE events ADD COLUMN account_id TEXT')
+        # Use Python rather than relying on an optional SQLite JSON extension.
+        # Persist ownership before strategy deletion can remove the join target.
+        for row in self.db.execute('''SELECT events.id, strategies.data FROM events
+                    JOIN strategies ON strategies.id=events.strategy_id
+                    WHERE events.account_id IS NULL''').fetchall():
+            try:
+                owner = json.loads(row['data']).get('accountId')
+            except (ValueError, TypeError, AttributeError):
+                continue
+            if isinstance(owner, str) and owner:
+                self.db.execute('UPDATE events SET account_id=? WHERE id=?', (owner, row['id']))
         self.db.commit()
         try:
             os.chmod(directory / 'arcus.sqlite3', 0o600)
@@ -81,14 +95,27 @@ class Store:
             row = self.db.execute('SELECT data FROM strategies WHERE id=?', (strategy_id,)).fetchone()
         return json.loads(row['data']) if row else None
 
-    def event(self, level, message, strategyId=None):
+    def delete_strategy(self, strategy_id):
+        """Remove only the strategy row; account snapshots and event history survive."""
         with self.lock, self.db:
-            self.db.execute('INSERT INTO events(time,level,message,strategy_id) VALUES(?,?,?,?)',
-                            (time.time(), level, message[:1000], strategyId))
+            result = self.db.execute('DELETE FROM strategies WHERE id=?', (strategy_id,))
+            return result.rowcount > 0
+
+    def event(self, level, message, strategyId=None, accountId=None):
+        with self.lock, self.db:
+            if accountId is None and strategyId:
+                row = self.db.execute('SELECT data FROM strategies WHERE id=?', (strategyId,)).fetchone()
+                if row:
+                    try:
+                        accountId = json.loads(row['data']).get('accountId')
+                    except (ValueError, TypeError, AttributeError):
+                        pass
+            self.db.execute('INSERT INTO events(time,level,message,strategy_id,account_id) VALUES(?,?,?,?,?)',
+                            (time.time(), level, message[:1000], strategyId, accountId))
             self.db.execute('DELETE FROM events WHERE id < (SELECT COALESCE(MAX(id),0)-2000 FROM events)')
 
     def events(self):
         with self.lock:
             return [{'id': r['id'], 'time': int(r['time'] * 1000), 'level': r['level'],
-                     'message': r['message'], 'strategyId': r['strategy_id']}
+                     'message': r['message'], 'strategyId': r['strategy_id'], 'accountId': r['account_id']}
                     for r in self.db.execute('SELECT * FROM events ORDER BY id DESC LIMIT 150')]

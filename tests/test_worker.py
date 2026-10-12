@@ -99,6 +99,14 @@ def test_bbo_read_failure_blocks_resting_orders_keeps_fresh_mark_and_ticks(worke
     assert store.strategy['status'] == 'running'
 
 
+def test_strategy_deleted_after_worker_list_does_not_abort_reconciliation(worker_module, monkeypatch):
+    module, store, public, engine = worker_module
+    monkeypatch.setattr(store, 'get_strategy', lambda identity: None)
+    module.one_cycle()
+    assert engine.calls == []
+    assert store.events == []
+
+
 def test_stale_market_cache_still_ticks_invalid_pricing_without_bbo(worker_module, monkeypatch):
     module, store, public, engine = worker_module
     public.market_error = RuntimeError('markets unavailable')
